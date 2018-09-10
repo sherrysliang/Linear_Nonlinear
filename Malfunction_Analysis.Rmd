@@ -1,0 +1,540 @@
+---
+title: "Linear and Nonlinear"
+author: "Sherry Liang"
+date: "3/6/2018"
+output: html_document
+---
+
+## 1. Problem Description
+
+The business analytics group of a company is asked to investigate causes of malfunctions in technological process of one of the manufacturing plants that result in significantly increased cost to the end product of the business.
+One of suspected reasons for malfunctions is deviation of temperature during the process from optimal levels. The sample in the provided file contains times of malfunctions in seconds since the start of measurement and minute records of temperature.
+
+## 2. Data 
+
+```{r}
+dataPath<-"..."
+Data.Orig<-read.csv(file=paste(dataPath,"LinearNonLinear_MalfunctionData.csv",sep="/"))
+dim(Data.Orig)
+head(Data.Orig)
+```
+
+## 3. Create Counting Process, Explore Cumulative Intensity
+```{r}
+Counting.Process<-as.data.frame(cbind(Time=Data.Orig$Time,Count=1:length(Data.Orig$Time)))
+Counting.Process[1:20,]
+```
+
+```{r}
+plot(Counting.Process$Time,Counting.Process$Count,type="s")
+```
+
+#### The counting process trajectory looks pretty smooth and grows steadily.What does it tell you about the character of malfunctions and the reasons causing them?
+>  The counting process trajectory appears to be a diagonal line, which means that malfunctions occur at a roughly constant frequency rate. It might indicate that the malfunctions are random and independent from each other and might follow Poisson process.
+
+### 3.1 Explore the Cumulative intensity of the process
+Cumulative intensity is calculated as the number of events between time zero and t divided by t. For our data t is the sequence of time stamps and Nt is the count up until t.
+
+```{r}
+plot(Counting.Process$Time,Counting.Process$Count/Counting.Process$Time,type="l",ylab="Cumulative Intensity")
+abline(h=Counting.Process$Count[length(Counting.Process$Count)]/
+         Counting.Process$Time[length(Counting.Process$Time)])
+abline(h=mean(Counting.Process$Count/Counting.Process$Time))
+```
+
+The two horizontal lines on the graph ate at the mean cumulative intensity and last cumulative intensity levels. The cumulative intensity seems to converge to a stable level.
+
+```{r}
+c(Last.Intensity=Counting.Process$Count[length(Counting.Process$Count)]/
+         Counting.Process$Time[length(Counting.Process$Time)],
+  Mean.Intensity=mean(Counting.Process$Count/Counting.Process$Time))
+```
+
+## 4. Check for overdispersion
+
+In order to do that calculate one-minute event counts and temperatures.For example, look at the first 20 rows of the data.
+
+```{r}
+Data.Orig[1:10,]
+```
+
+The Time column is in seconds.
+Note that the first 7 rows (events) occurred during the first minute.
+The temperature measurement for the first minute was 91.59307°F.
+The following 10 rows happen during the second minute and the second minute temperature is 97.3086°F.
+The third minute had 7 events at temperature 95.98865°F.
+The fourth minute had 4 events at 100.3844°F.
+And the following fifth minute had only 1 event at 99.9833°F.
+After constructing a data frame of one-minute counts and the corresponding temperatures we should see.
+
+```{r}
+len <- ceiling(max(Counting.Process$Time)/60)
+library(magrittr)
+library(plyr)
+One.Minute.Counts.Temps <-
+  Data.Orig %>% cbind(Count=Counting.Process$Count) %>%
+    ddply( ~Temperature, function(minute_frame) {
+      data.frame(Minute.times = unique(floor(minute_frame$Time/60)*60+30),
+               Minute.counts = nrow(minute_frame))
+})
+# Reorder by time recorded
+One.Minute.Counts.Temps <- One.Minute.Counts.Temps[order(One.Minute.Counts.Temps$Minute.times),]
+rownames(One.Minute.Counts.Temps) <- NULL
+One.Minute.Counts.Temps<-One.Minute.Counts.Temps[,c(2,1,3)]
+colnames(One.Minute.Counts.Temps) <- c('Minute.times','Minute.Temps','Minute.Counts' )
+
+# Note: There are some one-minute periods without records of malfunction. Need to be included in the dataframe.
+library(DataCombine)
+for (i in 2:len){
+        if ((One.Minute.Counts.Temps$Minute.times[i]-One.Minute.Counts.Temps$Minute.times[i-1])!=60)
+                {One.Minute.Counts.Temps <- InsertRow(One.Minute.Counts.Temps, NewRow = cbind(i*60-30,NA,0), RowNum = i)}
+}
+dim(One.Minute.Counts.Temps)
+# 4.0.1 show first 10 rows
+One.Minute.Counts.Temps[1:10,]
+```
+```{r}
+plot(One.Minute.Counts.Temps$Minute.times,One.Minute.Counts.Temps$Minute.Counts)
+```
+
+### 4.1 Methods for testing overdispersion:
+
+### 4.1.1 Quick and dirty method.
+Look at the output of glm() and compare the residual deviance with the number of degrees of freedom.
+If the assumed model is correct deviance is asymptotically distributed as Chi-squared (X2) with degrees of freedom n−k where n is the number of observations and k is the number of parameters.
+For Chi-squared distribution the mean is the number of degrees of freedom n−k.
+If the residual deviance returned by glm() is greater than n−k then it might be a sign of overdispersion.
+If no overdipersion, then expectation of deviance should be near the residual degress of freedom -- if we divide both and there is no overdispersion, then we should get something near 1.
+Test the method on simulated Poisson data.
+```{r}
+# use distribution that we know is poisson and test function will give us what we think
+Test.Deviance.Overdispersion.Poisson<-function(Sample.Size,Parameter.Lambda){
+  my.Sample<-rpois(Sample.Size,Parameter.Lambda) 
+  Model<-glm(my.Sample~1,family=poisson) 
+  Dev<-Model$deviance 
+  Deg.Fred<-Model$df.residual 
+  (((Dev/Deg.Fred-1)/sqrt(2/Deg.Fred)>-1.96)&((Dev/Deg.Fred-1)/sqrt(2/Deg.Fred)<=1.96))*1
+} 
+Test.Deviance.Overdispersion.Poisson(100,1)
+```
+
+```{r}
+sum(replicate(300,Test.Deviance.Overdispersion.Poisson(100,1)))
+```
+
+```{r}
+exp(glm(rpois(1000,2)~1,family=poisson)$coeff)
+```
+
+Same test on negative binomial data:
+
+```{r}
+Test.Deviance.Overdispersion.NBinom<-function(Sample.Size,Parameter.prob){
+  my.Sample<-rnbinom(Sample.Size,2,Parameter.prob)
+  Model<-glm(my.Sample~1,family=poisson)
+  Dev<-Model$deviance
+  Deg.Fred<-Model$df.residual
+  (((Dev/Deg.Fred-1)/sqrt(2/Deg.Fred)>-1.96)&((Dev/Deg.Fred-1)/sqrt(2/Deg.Fred)<=1.96))*1
+} 
+sum(replicate(300,Test.Deviance.Overdispersion.NBinom(100,.2)))
+```
+
+We see that the over-dispersed negative binomial distribution sample never passes the test.
+Now apply the test to the one-minute event counts.
+
+```{r}
+GLM.model<-glm(One.Minute.Counts.Temps$Minute.Counts~1,family=poisson)
+GLM.model
+```
+
+#### Do you see signs of over-dispersion?
+>  Yes. As the residual deviance is much larger than the degrees of freedom, we can say that there are signs of overdispersion.
+
+### 4.1.2 Regression test by Cameron-Trivedi
+
+Use the AER package to test the hypothesis that the variance is equal to the mean.
+This first tests that dispersiontest gives us the expected results. Then we use the dispersiontest to test GLM.model.
+
+```{r,warning=FALSE}
+suppressWarnings(library(AER))
+library(AER)
+#4.1.2.1
+Disp.Test <- dispersiontest(GLM.model)
+Disp.Test
+```
+
+#### Does the test show overdispersion?
+>  Yes. Given the extremely small p-value of < 2.2e-16, we reject the null hypothesis that the mean is equal to the variace. There are signs of overdispersion, which is consistent with our earlier findings.
+
+### 4.1.3 Test against Negative Binomial Distribution
+The null hypothesis of this test is that the distribution is Poisson as particular case of Negative binomial against Negative Binomial. 
+
+```{r,warning=FALSE,results=FALSE}
+library(MASS)
+library(pscl)
+```
+
+Test the validitiy of the odtest.
+Use odTest to test the glm.nb model created by the mass package 
+
+```{r}
+GLM.model.nb<-glm.nb(One.Minute.Counts.Temps$Minute.Counts~1)
+GLM.model.nb
+odTest(GLM.model.nb)
+```
+
+#### Does this test show overdispersion?
+>  The p-value is again very small, indicating overdispersion.
+
+## 5. Distribution of the Poisson Intensity
+Kolmogorov-Smirnov test -- tests if samples come from same distribution
+
+```{r,warning=FALSE}  
+library(RColorBrewer)
+library(lattice)
+library(latticeExtra)
+```
+
+```{r}
+sample1=rnorm(100)
+sample2=rnorm(100,1,2)
+Cum.Distr.Functions <- data.frame(sample1,sample2)
+ecdfplot(~ sample1 + sample2, data=Cum.Distr.Functions, auto.key=list(space='right'))
+```
+```{r}
+ks.test(sample1,sample2)
+```
+#### What does this output tell you about equivalence of the two distributions?
+>  Given that the p-value is very small, we reject the null hypothesis that the two samples are from the same distribution. They are generated from different distribution.
+
+Check eqiovalence of empirical distribution of sample1 and theoretical distribution Norm(0,1).
+The null hypothesis is that the distributions are the same.
+
+```{r}
+ks.test(sample1,"pnorm",mean=0,sd=1)
+```
+
+#### What does this output tell you?
+>  The p-value is large, indicating that there is weak evidence that sample 1 is different from a normal distribution with mean 0 and standard deviation 1.
+
+Check equivalence of the empirical distribution of sample2 and theoretical distribution Norm(0,1).
+
+```{r}
+ks.test(sample2,"pnorm",mean=0,sd=1)
+```
+#### What does this output tell you?
+>  The p value is very small and it appears that sample 2 is significantly different from the normal distribution.
+
+### 5.2. Check the distribution for the entire period.
+Apply Kolmogorov-Smirnov test to Counting.Process$Time and theoretical exponential distribution with parameter equal to average intensity. Hint: the empirical distribution should be estimated for time intervals between malfunctions.
+If it is a poisson distribution, then the time intervals between malfunctions should be exponential
+
+```{r}
+time.differences <- diff(Counting.Process$Time)
+ks.test(time.differences, "pexp", rate=1/mean(time.differences))
+# plot a CDF of the time differences
+ecdfplot(~ time.differences)
+```
+
+### 5.3. Check distribution of one-minute periods
+
+Use at least 5 different candidates for distribution of Poisson intensity of malfunctions. Find one-minute intensities.  Hint: One-minute intensity by definition is the number of events per unit of time (second).
+
+```{r}
+Event.Intensities <- One.Minute.Counts.Temps$Minute.Counts/60
+hist(Event.Intensities,breaks = 8)
+```
+
+#### What distribution does this histogram remind you of?
+>  The histogram reminds me of gamma or exponential distribution
+
+### Suggest 5 candidates for the distribution.
+1st Distribution:
+Normal
+```{r}
+Fitting.Normal <- fitdistr(Event.Intensities, "normal")
+Fitting.Normal
+```
+
+2nd Distribution 
+Exponential
+```{r}
+Fitting.Exponential <- fitdistr(Event.Intensities, "exponential")
+Fitting.Exponential
+```
+
+3rd Distribution
+Geometric
+```{r,warning=FALSE}
+Fitting.Geometric <- fitdistr(Event.Intensities, "geometric")
+Fitting.Geometric
+```
+
+4th Distribution
+Beta
+```{r,warning=FALSE}
+Fitting.Beta <- fitdistr(Event.Intensities[Event.Intensities>0], "beta", list(shape1=.5, shape2=.5))
+Fitting.Beta
+```
+
+5th Distribution
+Gamma
+```{r}
+Fitting.Gamma <- fitdistr(Event.Intensities[Event.Intensities>0], "gamma",list(shape = 1, rate = 0.1), lower = 0.001, upper=.999)
+Fitting.Gamma
+```
+
+Test the fitted distributions with the Kolmogoraov-Smirnov Test
+Normal:
+```{r,warning=FALSE}
+KS.Normal <- ks.test(Event.Intensities, "pnorm", mean=Fitting.Normal$estimate["mean"], sd=Fitting.Normal$estimate["sd"])
+c(KS.Normal$statistic, P.Value=KS.Normal$p.value)
+```
+
+Exponential:
+```{r,warning=FALSE}
+KS.Exp <- ks.test(Event.Intensities, "pexp", rate=Fitting.Exponential$estimate["rate"])
+c(KS.Exp$statistic, P.Value=KS.Exp$p.value)
+```
+
+Geometric:
+```{r,warning=FALSE}
+KS.Geom <- ks.test(Event.Intensities, "pgeom", prob=Fitting.Geometric$estimate["prob"])
+c(KS.Geom$statistic, P.Value=KS.Geom$p.value)
+```
+
+Beta:
+```{r,warning=FALSE}
+KS.Beta <- ks.test(Event.Intensities, "pbeta", shape1=Fitting.Beta$estimate["shape1"],  shape2=Fitting.Beta$estimate["shape2"])
+c(KS.Beta$statistic, P.Value=KS.Beta$p.value)
+```
+
+Gamma:
+```{r,warning=FALSE}
+KS.Gamma <- ks.test(Event.Intensities, "pgamma", shape=Fitting.Gamma$estimate["shape"], rate=Fitting.Gamma$estimate["rate"])
+c(KS.Gamma$statistic, P.Value=KS.Gamma$p.value)
+```
+
+Fit the gamma distribution directly.
+
+```{r}
+Intensity.mean <- mean(Event.Intensities)
+Intensity.variance  <- var(Event.Intensities)*(length(Event.Intensities)-1)/length(Event.Intensities)
+(Moments.Rate <- Intensity.mean/Intensity.variance)
+(Moments.Shape <- Intensity.mean*(Intensity.mean/Intensity.variance))
+```
+
+Check gamma distribution with these parameters as a theoretical distribution using Kolmogorov-Smirnov test.
+
+Ks- Test the method of moments gamma parameters against the known distribution
+```{r,warning=FALSE}
+KS.Test.Moments <- ks.test(Event.Intensities,"pgamma", shape = Moments.Shape, rate = Moments.Rate)
+KS.Test.Moments
+```
+
+#### What distribution for the one-minute intensity of malfunctions do you choose? What distribution of one-minute malfunctions counts follow from your choice
+>  The gamma distribution model has an extremely low D statistic and p-value. So we can conclude that the intensities follow a gamma distribution. The existense of overdispersion implies that the one-minute malfunction counts follow a negative binomial distribution. 
+
+
+### Explore possible types of dependence between one-minute counts and temperature.
+
+```{r}
+# Remove rows with NA.
+One.Minute.Counts.Temps <- One.Minute.Counts.Temps[complete.cases(One.Minute.Counts.Temps),]
+# 2.2.2 Dimension after removing NAs
+dim(One.Minute.Counts.Temps)
+```
+
+```{r}
+# Add column with intensities.
+One.Minute.Counts.Temps<-as.data.frame(cbind(One.Minute.Counts.Temps,One.Minute.Counts.Temps[,3]/60))
+colnames(One.Minute.Counts.Temps)<-c("Times","Temperatures","Counts","Intensities")
+One.Minute.Counts.Temps<-One.Minute.Counts.Temps[,c(1,3,2,4)]
+# 2.2.3 Match the plot of temperature vs. intensities
+head(One.Minute.Counts.Temps)
+```
+
+```{r}
+# Visualize the data.
+plot(One.Minute.Counts.Temps$Temperatures,One.Minute.Counts.Temps$Intensities)
+```
+
+#### Q2.2.4:Interpret the plot. What type of relationship you observe?
+>  I observe a positive correlation -- the intensities increase as temperatures increase. However, the correlation is not perfectly linear -- when intensities are low the data points are more widely spread across temperatures.
+
+Analyze empirical copula.
+```{r}
+plot(rank(One.Minute.Counts.Temps$Temperatures),rank(One.Minute.Counts.Temps$Intensities))
+```
+
+#### Q2.2.5:What type of dependency you see in the empirical copula?
+>  We see an uppertail dependency -- the pinched corner lies at the upper right corner, which indicates Gumbel copula. 
+
+What is the distribution of temperatures?
+```{r}
+suppressWarnings(library(MASS))
+hist(One.Minute.Counts.Temps$Temperatures)
+```
+
+>  The distribution looks fairly normal. 
+
+Estimate and test normal distribution using fitdistr() from MASS.
+Use Kolmogorov-Smirnov test function ks.test() to confirm correctness of normal assumption for temperature.
+```{r,warning=FALSE}
+library(MASS)
+Fitting.Temprature <- fitdistr(One.Minute.Counts.Temps$Temperatures, "normal") 
+# 2.2.6
+Fitting.Temprature
+# 2.2.7
+ks.test(One.Minute.Counts.Temps$Temperatures,"pnorm", mean = Fitting.Temprature$estimate[1], sd = Fitting.Temprature$estimate[2])
+```
+
+>  The p-value is very large and we find little evidence to reject the null hypothesis that the data follows normal distribution.
+
+### Fit a copula
+Select a parametric copula appropriate for the observed type of dependence.
+Fit the copula Copula.Fit and use it for simulation of rare events.
+```{r}
+# 2.2.8
+library(copula)
+suppressWarnings(library(copula))
+
+Copula.Object<-gumbelCopula(param=5,dim=2)
+Copula.Fit<-fitCopula(Copula.Object, 
+                       pobs(One.Minute.Counts.Temps[c("Temperatures", "Intensities")],ties.method = "average"),
+                      method="ml",
+                      optim.method="BFGS",
+                      optim.control = list(maxit=1000))
+Copula.Fit
+```
+
+Simulate data using Copula.Fit with one variable normally distributed, as temperature and the other with the distribution of your choice for the intensities.
+In order to make comparison possible use set.seed(8301735).
+First simulate 250 observations and make a 4-panel graph that we use to represent copula.
+Remember to create a copula object before running simulation.
+```{r}
+# 2.2.9
+par(mfrow=c(2,2))
+set.seed(8301735)
+Defined.copula<-gumbelCopula(param=Copula.Fit@estimate,dim=2)
+persp(Defined.copula, dCopula, main="pdf",xlab="u", ylab="v", zlab="c(u,v)")
+contour(Defined.copula,dCopula, main="pdf",xlab="u", ylab="v")
+Simulated.Gumbel.Copula<-rCopula(250,Defined.copula)
+plot(Simulated.Gumbel.Copula,main="Simulated Copula",xlab="Variable 1",ylab="Variable 2")
+plot(apply(Simulated.Gumbel.Copula,2,rank)/length(Simulated.Gumbel.Copula[,1]),main="Empirical Copula",xlab="Variable 1",ylab="Variable 2")
+title("Copula.Fit",outer=TRUE,line=-2)
+```
+
+Now run longer simulation to observe more tail events using estimated parameters for distributions of temperatures and intensities.
+Simulate 5000 pairs of intensities and temperatures using the estimated copula.
+Use the same seed.
+```{r}
+# Result from Part1
+Moments.Rate<-8.132313
+Moments.Shape<-1.655739
+```
+
+```{r}
+# 2.2.10
+set.seed(8301735)
+Simulated.Copula <- rCopula(5000, Defined.copula)
+Simulated.Temperature <- qnorm(Simulated.Copula[,2],mean = Fitting.Temprature$estimate[1], sd = Fitting.Temprature$estimate[2]) 
+Simulated.Intensities <- qgamma(Simulated.Copula[,1],rate = Moments.Rate, shape = Moments.Shape) 
+#2.2.11
+plot(Simulated.Temperature,Simulated.Intensities)
+```
+
+```{r}
+#2.2.12
+plot(rank(Simulated.Temperature),rank(Simulated.Intensities))
+```
+
+Now we can use the simulated data to analyze the tail dependency.
+Select the simulated pairs with intensity greater than 0.5 and temperature greater than 110.
+Use these data to fit negative binomial regression.
+
+Use the initial sample of intensities and temperatures to fit the negative binomial regression for more regular ranges of intensity and temperature.
+
+First, fit the model to the sample, the name of the fitted model is NB.Fit.To.Sample. 
+```{r}
+# 2.2.13
+NB.Fit.To.Sample<- glm.nb(Counts~Temperatures, data=One.Minute.Counts.Temps, init.theta=4.202611755, link=log)
+```
+
+Analize the summary of the fit.Below are the returned parameters.
+```{r}
+NB.Fit.To.Sample$coefficients
+```
+
+```{r}
+NB.Fit.To.Sample$deviance
+```
+
+```{r}
+NB.Fit.To.Sample$df.residual
+```
+
+```{r}
+NB.Fit.To.Sample$aic
+```
+
+Create the simulated sample for tail events.
+```{r}
+Simulated.Tails<-as.data.frame(
+  cbind(round(Simulated.Intensities[(Simulated.Temperature>110)&(Simulated.Intensities>.5)]*60),
+        Simulated.Temperature[(Simulated.Temperature>110)&(Simulated.Intensities>.5)]))
+colnames(Simulated.Tails)<-c("Counts","Temperatures")
+```
+
+Plot the simulated tail events.
+```{r}
+# 2.2.14
+plot(Simulated.Tails$Temperatures,Simulated.Tails$Counts)
+```
+
+Fit negative binomial model to the tail observations Simulated.Tails.
+```{r,warning=FALSE}
+# 2.2.15
+NB.Fit.To.Simulated <- glm.nb(Counts~Temperatures, data = Simulated.Tails)
+```
+
+Compare the summaries of the two models. Note that the parameter θ estimated by glm.nb() defines the variance of the model as μ+μ2/θ, where μ is the mean. In other words, θ defines overdispersion.
+
+
+```{r}
+c(NB.Fit.To.Sample$theta,NB.Fit.To.Simulated$theta)
+```
+#### Q2.2.17:What do the fitted parameters θ tell you about both models?
+>  The θ of the sample model is about 4, which is a sign of overdispersion. This leads us to apply negative binomial regression to fit the sample. However, the θ of the simulated model is very large. As we learnt in class, Poisson distribution is a particular case of negative binomial distribution when θ=∞.
+
+#### Q2.2.18:Is there an alternative model that you would try to fit to the simulated tail data?
+>  Based on the anlaysis above, I'd like to try Poisson distribution.
+
+Fit poisson model to Simulated.Tails$Counts and compare the fit with the nagative binomial fit for One.Minute.Counts.Temps.
+```{r}
+Poisson.Fit <- glm(Counts~Temperatures, family = poisson,data = Simulated.Tails) 
+```
+
+#### Q2.2.19:What do both models tell you about the relationships between the temperature and the counts?
+
+```{r}
+rbind(summary(NB.Fit.To.Sample)$coefficients,summary(NB.Fit.To.Simulated)$coefficients)
+```
+
+>  The parameters of Temperatures for both models are positive with extremely small p-values, which indicates that there is a positive relationship between Temperature and Counts. Both estimates are around 0.1, so we can say that on average an increase in the temperature by one degree leads to an increase in the logs of the counts by 0.1.
+
+#### Q2.2.20:Is there overdispersion in the Poisson fit?
+
+```{r}
+Poisson.Fit$deviance
+```
+
+```{r}
+Poisson.Fit$df.residual
+```
+
+```{r}
+Poisson.Fit$aic
+```
+
+>  Since the deviance is very close the degree of freedom of the Poisson model, there is no overdispersion of the Poisson fit.
